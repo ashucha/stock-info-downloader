@@ -12,7 +12,7 @@ gemini = genai.GenerativeModel("gemini-pro")
 app = Flask(__name__)
 
 # Query by ticker
-@app.route("/ticker/<ticker>", methods=["POST"])
+@app.route("/ticker/<ticker>", methods=["GET"])
 def get_ticker_info(ticker: str):
     ticker = ticker.upper()
     # Download 10-K records
@@ -32,12 +32,20 @@ def get_ticker_info(ticker: str):
     filings = {(int(f[11:13]) + 5) % 100 : f for f in dn}
     filings = dict(sorted(filings.items())) # Sort filings by year
 
+    background = get_company_background(ticker, filings)
+    stats = get_company_stats(ticker, dp, filings)
+
+    res = {"background": background, "stats": stats}
+
+    return res, 200
+    
+
+# Gets the background info of a company via the corresponding 10-K segment
+def get_company_background(ticker: str, filings: dict) -> str:
     # Get latest filing directory
     latest_filing_key = max(filings)
     latest_filing_folder = filings[latest_filing_key]
     filepath = f"sec-edgar-filings/{ticker}/10-K/{latest_filing_folder}/full-submission.txt"
-
-    response = ""
 
     with open(filepath, "rb") as f:
         b = f.read()
@@ -47,42 +55,78 @@ def get_ticker_info(ticker: str):
         # Slice the text between the "Company Background" and "Markets and Distribution" sections
         start = find_nth_match(s, "Item 1.", 2) + len("Item 1.")
         end = start + 75000
-        print(start, end)
-        background = s[start : end]
+        background_segment = s[start : end]
         with open("debug.txt", "w") as debug:
-            debug.write(background)
+            debug.write(background_segment)
             debug.close()
-    
-        # Get company background from latest 10-K file
-        response = get_company_background(filepath, background)
 
         f.close()
 
-    res = {"background": response}
-
-    return res, 200
-    
-
-# Gets the background info of a company via the corresponding 10-K segment
-def get_company_background(filepath: str, background_segment: str):
-    response = ""
     n = len("/full_submission.txt") + 21
     folder = filepath[:-n]
     output_filepath = f"{folder}/background.txt"
 
     if os.path.exists(output_filepath):
         with open(output_filepath, "r") as f:
-            response = f.read()
+            generated_background = f.read()
             f.close()
     else:
         # Generate background info from LLM
-        response = generate_content("Generate a brief markdown company summary from this", background_segment)
+        generated_background = generate_content("Generate a brief markdown company summary from this", background_segment)
 
         with open(output_filepath, "w") as f:
-            f.write(response)
+            f.write(generated_background)
             f.close()
 
-    return response
+    return generated_background
+
+
+def get_company_stats(ticker: str, dirpath: str, folders: dict) -> dict:
+    folder = f"sec-edgar-filings/{ticker}/10-K"
+
+    stats_dict = []
+    
+    for key, filing in folders.items():
+        filename = f"{dirpath}/{filing}"
+        filename = f"{filename}/full-submission.txt"
+
+        with open(filename, "r", encoding="utf-8-sig") as f:
+            s = f.read()
+            s = clean_data(s) # Filter HTML tags from data
+
+            f = open("debug.txt", "w")
+            f.write(s)
+            f.close()
+
+            # Get n-th occurrence of "Item 8." and "Item 9."
+            if s.count("Item 8.") == 1:
+                n1 = 1
+            else:
+                n1 = 2
+
+            if s.count("Item 9.") == 1:
+                n2 = 1
+            else:
+                n2 = 2
+
+            # Slice the text between "Item 8." and "Item 9."
+            start = find_nth_match(s, "Item 8.", n1) + len("Item 8.")
+            end = start + 200000
+
+            stats_segment = s[start : end]
+
+            f.close()
+        
+        # generated_pps = generate_content("What is the price per share for this stock. Answer as one simple number.", stats_segment)
+        # generated_eps = generate_content("What is the price earnings share for this stock. Answer as one simple number.", stats_segment)
+        generated_pps = 0
+        generated_eps = 0
+
+        year = int(key) - 5
+        stats_dict.append({"year": year, "pps": generated_pps, "eps": generated_eps})
+        print(stats_dict)
+    
+    return stats_dict
     
 
 def clean_data(s: str) -> str:
