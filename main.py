@@ -2,14 +2,44 @@ import os
 import re
 from dotenv import load_dotenv
 from flask import Flask, json, jsonify
+from flask_cors import CORS
 from sec_edgar_downloader import Downloader
 import google.generativeai as genai
+import google.ai.generativelanguage as glm
 import markdown
 
 load_dotenv()
 
 gemini = genai.GenerativeModel("gemini-pro")
 app = Flask(__name__)
+CORS(app)
+
+stats_examples_file = open("stats_examples.txt")
+stats_example1 = stats_examples_file.readline()
+stats_example2 = stats_examples_file.readline()
+stats_examples_file.close()
+
+# Develop schema for LLM to extract PPS including examples
+functions = glm.Tool(
+    function_declarations=[
+        glm.FunctionDeclaration(
+            name="pps",
+            description="Extract the per share of company's stock from a table",
+            parameters=glm.Schema(
+                type=glm.Type.OBJECT,
+                properties={
+                    "price_per_share": glm.Schema(type=glm.Type.NUMBER)
+                },
+                required=["price_per_share"],
+                description=stats_example1 + "Answer: 176.31\n" + stats_example2 + "Answer: 93.93\n"
+            )
+        )
+    ]
+)
+
+stats_model = genai.GenerativeModel("gemini-pro", tools=functions.function_declarations[0])
+stats_chat = stats_model.start_chat()
+
 
 # Query by ticker
 @app.route("/ticker/<ticker>", methods=["GET"])
@@ -52,13 +82,14 @@ def get_company_background(ticker: str, filings: dict) -> str:
         s = b.decode(encoding="utf-8")
         s = clean_data(s) # Filter HTML tags from data
 
-        # Slice the text between the "Company Background" and "Markets and Distribution" sections
-        start = find_nth_match(s, "Item 1.", 2) + len("Item 1.")
-        end = start + 75000
-        background_segment = s[start : end]
-        with open("debug.txt", "w") as debug:
-            debug.write(background_segment)
-            debug.close()
+        # Slice only relevant portion of company background text
+        start = find_nth_match(s, "Item 1", 2)
+        end = start + 25000
+        print(start, end)
+        background_segment = ticker + s[start : end]
+        debug = open("background_segment.txt", "w")
+        debug.write(background_segment)
+        debug.close()
 
         f.close()
 
@@ -89,42 +120,44 @@ def get_company_stats(ticker: str, dirpath: str, folders: dict) -> dict:
     for key, filing in folders.items():
         filename = f"{dirpath}/{filing}"
         filename = f"{filename}/full-submission.txt"
+        year = int(key) - 5
+
+        if year > 23:
+            year += 1900
+        else:
+            year += 2000
 
         with open(filename, "r", encoding="utf-8-sig") as f:
             s = f.read()
             s = clean_data(s) # Filter HTML tags from data
+            s = s.upper()
 
-            f = open("debug.txt", "w")
-            f.write(s)
+            # Get n-th occurrence of "Item 5." and "Item 6."
+            if s.count("ITEM 5") == 1 or s.count("ITEM5") == 1:
+                n = 1
+            else:
+                n = 2
+
+            # Slice the text between "Item 5." and "Item 6."
+            start = max(find_nth_match(s, "ITEM 5", n), find_nth_match(s, "ITEM5", n))
+            stats_segment = s[start :]
+            end = max(stats_segment.find("ITEM 6"), stats_segment.find("ITEM6"))
+            print(start, start + end)
+
+            stats_segment = stats_segment[: end]
+
+            f = open("stats_segment.txt", "w")
+            f.write(stats_segment)
             f.close()
-
-            # Get n-th occurrence of "Item 8." and "Item 9."
-            if s.count("Item 8.") == 1:
-                n1 = 1
-            else:
-                n1 = 2
-
-            if s.count("Item 9.") == 1:
-                n2 = 1
-            else:
-                n2 = 2
-
-            # Slice the text between "Item 8." and "Item 9."
-            start = find_nth_match(s, "Item 8.", n1) + len("Item 8.")
-            end = start + 200000
-
-            stats_segment = s[start : end]
 
             f.close()
         
-        # generated_pps = generate_content("What is the price per share for this stock. Answer as one simple number.", stats_segment)
+        # generated_pps = generate_content(f"Extract the price per share for this stock. Answer as one simple number.", stats_segment[50000:150000])
         # generated_eps = generate_content("What is the price earnings share for this stock. Answer as one simple number.", stats_segment)
-        generated_pps = 0
-        generated_eps = 0
+        generated_pps = year
+        generated_eps = year + 500
 
-        year = int(key) - 5
         stats_dict.append({"year": year, "pps": generated_pps, "eps": generated_eps})
-        print(stats_dict)
     
     return stats_dict
     
@@ -141,7 +174,7 @@ def clean_data(s: str) -> str:
 def generate_content(prompt: str, data: str):
     response = gemini.generate_content(f"{prompt}: {data}")
 
-    print(response.text)
+    # print(response.text)
     
     formatted_response = format_response(response.text)
 
@@ -174,4 +207,4 @@ def find_nth_match(s: str, match: str, n: int):
 
 
 if __name__ == "__main__":
-    app.run(port=8080)
+    app.run(port=8080, debug=True)
