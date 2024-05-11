@@ -162,6 +162,7 @@ cython_debug/
 # Other
 *.env
 *.html
+*segment.txt
 *debug*
 *test*
-*.md
+test.md
